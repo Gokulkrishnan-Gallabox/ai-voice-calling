@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎙️ Mastra Voice Agent</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 400px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.8rem;
+        }
+
+        .status {
+            font-size: 0.9rem;
+            margin-bottom: 30px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 500;
+        }
+
+        .status.connected {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .status.disconnected {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .call-button {
+            padding: 20px 40px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-width: 200px;
+            margin-bottom: 20px;
+        }
+
+        .call-button.start-call {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .call-button.end-call {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        .call-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .call-button:disabled {
+            background: #cbd5e1;
+            color: #64748b;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .audio-section {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+        }
+
+        .audio-section label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #374151;
+            font-size: 0.9rem;
+        }
+
+        audio {
+            width: 100%;
+            margin-top: 5px;
+            border-radius: 8px;
+        }
+
+        .call-state {
+            font-size: 0.9rem;
+            color: #6b7280;
+            margin-top: 10px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Voice Agent</h1>
+        <div id="status" class="status disconnected">Connecting...</div>
+        
+        <button 
+            id="callButton" 
+            class="call-button start-call" 
+            disabled
+        >
+            📞 Call
+        </button>
+        
+        <div id="callState" class="call-state"></div>
+        
+        <div class="audio-section">
+            <label>Echo from Server:</label>
+            <audio 
+                id="remoteAudio" 
+                controls 
+                autoplay 
+                playsinline 
+                style="display: block; margin-top: 5px;"
+            ></audio>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        // State management
+        let socket = null;
+        let isConnected = false;
+        let callState = 'idle'; // 'idle' | 'calling' | 'active'
+        let peerConnection = null;
+        let localStream = null;
+
+        // DOM elements
+        const statusEl = document.getElementById('status');
+        const callButton = document.getElementById('callButton');
+        const callStateEl = document.getElementById('callState');
+        const remoteAudio = document.getElementById('remoteAudio');
+
+        // Update UI based on connection state
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            if (connected) {
+                statusEl.textContent = '🟢 Connected';
+                statusEl.className = 'status connected';
+                callButton.disabled = callState === 'calling';
+            } else {
+                statusEl.textContent = '🔴 Disconnected';
+                statusEl.className = 'status disconnected';
+                callButton.disabled = true;
+                if (callState !== 'idle') {
+                    endCall();
+                }
+            }
+        }
+
+        // Update call state UI
+        function updateCallState(state) {
+            callState = state;
+            
+            switch (state) {
+                case 'idle':
+                    callButton.textContent = '📞 Call';
+                    callButton.className = 'call-button start-call';
+                    callButton.disabled = !isConnected;
+                    callStateEl.textContent = '';
+                    break;
+                case 'calling':
+                    callButton.textContent = '📞 Connecting...';
+                    callButton.className = 'call-button start-call';
+                    callButton.disabled = true;
+                    callStateEl.innerHTML = 'Establishing connection <span class="loading"></span>';
+                    break;
+                case 'active':
+                    callButton.textContent = '📞 End Call';
+                    callButton.className = 'call-button end-call';
+                    callButton.disabled = false;
+                    callStateEl.textContent = '✅ Call active - speak into your microphone';
+                    break;
+            }
+        }
+
+        // Start call function
+        async function startCall() {
+            if (!socket || callState !== 'idle') return;
+
+            try {
+                updateCallState('calling');
+
+                // 1. Get local media
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: true
+                });
+
+                // 2. Create PeerConnection
+                peerConnection = new RTCPeerConnection();
+
+                // Monitor connection state
+                peerConnection.onconnectionstatechange = () => {
+                    console.log('Connection state:', peerConnection.connectionState);
+                    if (peerConnection.connectionState === 'connected') {
+                        console.log('✅ WebRTC connection established');
+                        updateCallState('active');
+                    } else if (peerConnection.connectionState === 'failed') {
+                        console.log('❌ WebRTC connection failed');
+                        updateCallState('idle');
+                    }
+                };
+
+                // Handle and send ICE candidates
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('ice-candidate', {
+                            candidate: event.candidate.candidate,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex,
+                            sdpMid: event.candidate.sdpMid
+                        });
+                    }
+                };
+
+                // 3. Add local tracks
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // 4. Handle incoming remote tracks
+                const remoteStream = new MediaStream();
+                peerConnection.ontrack = (event) => {
+                    console.log('🎵 Received audio track from server');
+                    remoteStream.addTrack(event.track);
+                    remoteAudio.srcObject = remoteStream;
+                };
+
+                // 5. Set up remote audio element
+                remoteAudio.srcObject = remoteStream;
+
+                // 6. Create offer and send to server
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                socket.emit('call-offer', {
+                    sdp_type: 'offer',
+                    sdp: offer.sdp
+                });
+
+            } catch (err) {
+                console.error('Error starting call:', err);
+                updateCallState('idle');
+                alert('Error starting call: ' + err.message);
+            }
+        }
+
+        // End call function
+        function endCall() {
+            if (callState === 'idle') return;
+
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            if (remoteAudio) {
+                remoteAudio.srcObject = null;
+                remoteAudio.pause();
+            }
+
+            if (socket) {
+                socket.emit('terminate');
+            }
+
+            updateCallState('idle');
+        }
+
+        // Initialize socket connection
+        function initializeSocket() {
+            socket = io();
+
+            socket.on('connect', () => {
+                console.log('Connected to server');
+                updateConnectionStatus(true);
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Disconnected from server');
+                updateConnectionStatus(false);
+            });
+
+            socket.on('connect_error', () => {
+                console.log('Connection error');
+                updateConnectionStatus(false);
+            });
+
+            // Handle answer from server
+            socket.on('call-answer', async (data) => {
+                try {
+                    if (peerConnection) {
+                        const answer = { type: 'answer', sdp: data.sdp };
+                        await peerConnection.setRemoteDescription(answer);
+                    }
+                } catch (err) {
+                    console.error('Error handling answer from server:', err);
+                    updateCallState('idle');
+                }
+            });
+
+            // Handle ICE candidates from server
+            socket.on('ice-candidate', async ({ candidate, sdpMLineIndex, sdpMid }) => {
+                try {
+                    if (peerConnection && peerConnection.remoteDescription) {
+                        await peerConnection.addIceCandidate({
+                            candidate,
+                            sdpMLineIndex,
+                            sdpMid
+                        });
+                    }
+                } catch (err) {
+                    console.error('Error adding ICE candidate:', err);
+                }
+            });
+        }
+
+        // Event listeners
+        callButton.addEventListener('click', () => {
+            if (callState === 'idle') {
+                startCall();
+            } else {
+                endCall();
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            endCall();
+            if (socket) {
+                socket.close();
+            }
+        });
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeSocket();
+        });
+    </script>
+</body>
+</html>

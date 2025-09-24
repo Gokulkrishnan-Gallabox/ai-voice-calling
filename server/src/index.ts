@@ -1,132 +1,279 @@
 import express, { Request, Response } from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import wrtc, { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from "@koush/wrtc";
-import { Readable } from "stream";
+import axios from "axios";
+import path from "path";
+import { config } from "dotenv";
 
-import { Agent } from "@mastra/core/agent";
-import { openai } from "@ai-sdk/openai";
-import { OpenAIRealtimeVoice } from "@mastra/voice-openai-realtime";
+// Load environment variables
+config();
 
-// --- Config ---
+// Session management
+import { CallSession } from './call-session';
+
+// --- Express & Socket.IO Setup ---
 const app = express();
+app.use(express.json()); // Parse JSON bodies
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, '../public')));
+
 const server = createServer(app);
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-const SYSTEM_MESSAGE =
-  "You are an AI receptionist for Barts Automotive. Your job is to politely engage with the client and obtain their name, availability, and service/work required. Ask one question at a time. Do not ask for other contact information, and do not check availability, assume we are free. Ensure the conversation remains friendly and professional.";
+// --- Call Session Store ---
+const callSessions = new Map<string, CallSession>();
+
+// --- WhatsApp Configuration ---
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v18.0";
+
+if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_VERIFY_TOKEN) {
+  throw new Error("Missing required WhatsApp environment variables: WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN");
+}
+
+// --- Helper Functions ---
+
+/**
+ * Create a call session for WhatsApp call
+ */
+function createWhatsAppCallSession(callId: string): CallSession {
+  const session = new CallSession(callId, null); // No socket for WhatsApp calls
+  callSessions.set(callId, session);
+  return session;
+}
+
+/**
+ * Post SDP answer back to WhatsApp/Facebook Graph API
+ */
+async function postWhatsAppAnswer(phoneNumberId: string, callId: string, answerSdp: string): Promise<void> {
+  try {
+    const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/calls`;
+    
+    const payload = {
+      messaging_product: "whatsapp",
+      call_id: callId,
+      action: "pre_accept",
+      session: {
+        sdp_type: "answer",
+        sdp: answerSdp
+      }
+    };
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+  } catch (error) {
+    throw error;
+  }
+}
 
 // --- Routes ---
 app.get("/", (_req: Request, res: Response) => {
-  res.send("🎙️ Voice Agent WebRTC Server running");
+  res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-// --- Socket.IO Signaling ---
-io.on("connection", async (socket) => {
-  console.log("🔗 Client connected:", socket.id);
+// WhatsApp webhook verification (required by Facebook)
+app.get("/whatsapp/meta-tech-partner/accounts/668cfacf05cdeae70cb8db06/channels/67a9735ff774dcbc7fa7e3f1/webhook", (req: Request, res: Response) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-  // Setup WebRTC peer connection
-  const pc = new RTCPeerConnection();
+  if (mode === "subscribe" && token === WHATSAPP_VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
 
-  // --- AI Agent ---
-  const voiceAgent = new Agent({
-    name: "Voice Agent",
-    instructions: SYSTEM_MESSAGE,
-    model: openai("gpt-4o"),
-    voice: new OpenAIRealtimeVoice({ apiKey: OPENAI_API_KEY }),
-  });
-
-  // --- Incoming audio from Browser ---
-  pc.ontrack = (event: any) => {
-    const [track] = event.streams[0].getAudioTracks();
-    if (!track) return;
-
-
-    const { RTCAudioSink } = wrtc.nonstandard;
-    const sink = new RTCAudioSink(track);
-
-    const audioStream = new Readable({ read() {} });
-
-    sink.ondata = (data) => {
-      // Convert Float32 samples → Buffer
-      console.log("🎤 Sending audio to AI", data.samples.buffer);
-      audioStream.push(Buffer.from(data.samples.buffer));
-    };
-    sink.onclose = () => audioStream.push(null);
-
-    // Pipe audio to AI
-    (async () => {
-      for await (const chunk of audioStream) {
-        console.log("🎤 Sending audio to AI", chunk);
-        await voiceAgent.voice.send(chunk);
-      }
-    })();
-  };
-
-  // --- Outgoing audio from AI ---
-  const { RTCAudioSource } = wrtc.nonstandard;
-  const audioSource = new RTCAudioSource();
-  const outTrack = audioSource.createTrack();
-  pc.addTrack(outTrack);
-
-  let isCallActive = true;
-
-  voiceAgent.voice.on("speaker", (pcmBuffer: any) => {
-    if (!isCallActive) return;
-
-    console.log("🎤 Received audio from AI", pcmBuffer);
+// WhatsApp webhook endpoint to receive call offers
+app.post("/whatsapp/meta-tech-partner/accounts/668cfacf05cdeae70cb8db06/channels/67a9735ff774dcbc7fa7e3f1/webhook", async (req: Request, res: Response) => {
+  try {
+    const body = req.body;
     
-    // Convert AI PCM (Int16 16kHz mono) → WebRTC
-    const samples = new Int16Array(pcmBuffer);
-    audioSource.onData({
-      samples,
-      sampleRate: 16000,
-      bitsPerSample: 16,
-      channelCount: 1,
-      numberOfFrames: samples.length,
-    });
-  });
+    // Acknowledge receipt immediately
+    res.status(200).send("OK");
 
-  // --- Signaling exchange ---
-  socket.on("offer", async (offer) => {
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    socket.emit("answer", pc.localDescription);
-    isCallActive = true;
-    console.log("📞 Call started");
-  });
+    // Process WhatsApp webhook data
+    if (body.object === "whatsapp_business_account") {
+      for (const entry of body.entry || []) {
+        for (const change of entry.changes || []) {
+          if (change.field === "calls" && change.value?.calls) {
+            for (const call of change.value.calls) {
+              if (call.event === "connect" && call.session?.sdp) {
+                await handleWhatsAppCallOffer(
+                  change.value.metadata.phone_number_id,
+                  call.id,
+                  call.session.sdp,
+                  call.from,
+                  call.to
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    // Don't send error response - webhook is already acknowledged
+  }
+});
 
-  socket.on("ice-candidate", async (candidate) => {
-    if (!candidate) return;
+/**
+ * Handle WhatsApp call offer and generate answer
+ */
+async function handleWhatsAppCallOffer(
+  phoneNumberId: string,
+  callId: string, 
+  offerSdp: string,
+  fromNumber: string,
+  toNumber: string
+): Promise<void> {
+  try {
+    // Create call session for this WhatsApp call
+    const session = createWhatsAppCallSession(callId);
+
+    // Set remote description from WhatsApp offer
+    const offer = { type: "offer" as RTCSdpType, sdp: offerSdp };
+    await session.setRemoteDescription(offer);
+
+    // Set up audio sink now that we have remote tracks
+    session.setupAudioSink();
+
+    // Create answer (server responds to WhatsApp offer)
+    const answer = await session.createAnswer();
+
+    if (!answer.sdp) {
+      throw new Error("Failed to generate SDP answer");
+    }
+
+    // Post the answer back to WhatsApp
+    await postWhatsAppAnswer(phoneNumberId, callId, answer.sdp);
+
+    // Initialize voice agent for this session
+    await session.initializeVoice();
+
+  } catch (error) {
+    
+    // Clean up session on error
+    const session = callSessions.get(callId);
+    if (session) {
+      session.cleanup();
+      callSessions.delete(callId);
+    }
+  }
+}
+
+// --- Helper function to create call session ---
+function createCallSession(socket: any): CallSession {
+  const session = new CallSession(socket.id, socket);
+  callSessions.set(socket.id, session);
+  return session;
+}
+
+// --- Socket.IO Signaling ---
+io.on("connection", (socket) => {
+  socket.emit("connected", { message: "Connected to voice agent server" });
+
+  // Handle offer from client (client creates offer)
+  socket.on("call-offer", async ({ sdp }) => {
     try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      const session = createCallSession(socket);
+
+      // Set remote description from client offer
+      const offer = { type: "offer" as RTCSdpType, sdp };
+      await session.setRemoteDescription(offer);
+
+      // Set up audio sink now that we have remote tracks
+      session.setupAudioSink();
+
+      // Create answer (server responds to client offer)
+      const answer = await session.createAnswer();
+
+      socket.emit("call-answer", {
+        sdp_type: "answer",
+        sdp: answer.sdp
+      });
+
+      // Initialize voice agent for this session once connection is established
+      await session.initializeVoice();
+
     } catch (err) {
-      console.error("❌ Failed to add ICE candidate", err);
+      const session = callSessions.get(socket.id);
+      if (session) {
+        session.cleanup();
+        callSessions.delete(socket.id);
+      }
     }
   });
 
-  // --- Call control signals ---
-  socket.on("end-call", () => {
-    console.log("📞 Call ended by client");
-    isCallActive = false;
+
+  // Handle ICE candidates from client
+  socket.on("ice-candidate", async ({ candidate, sdpMLineIndex, sdpMid }) => {
+    try {
+      const session = callSessions.get(socket.id);
+      if (session) {
+        await session.addIceCandidate({
+          candidate,
+          sdpMLineIndex,
+          sdpMid
+        });
+      }
+    } catch (err) {
+      // Skip on error
+    }
   });
 
+  // Handle call termination
+  socket.on("terminate", () => {
+    const session = callSessions.get(socket.id);
+    if (session) {
+      session.cleanup();
+    }
+    callSessions.delete(socket.id);
+  });
+
+  // Handle disconnect
   socket.on("disconnect", () => {
-    console.log("❌ Client disconnected:", socket.id);
-    isCallActive = false;
-    pc.close();
+    const session = callSessions.get(socket.id);
+    if (session) {
+      session.cleanup();
+    }
+    callSessions.delete(socket.id);
   });
 
-  // --- Kick off conversation ---
-  await voiceAgent.voice.speak("How can I help you today?");
+  // Clean up function for when connections fail
+  const cleanupSession = () => {
+    const session = callSessions.get(socket.id);
+    if (session) {
+      session.cleanup();
+      callSessions.delete(socket.id);
+    }
+  };
+
+  // Set cleanup timeout for failed connections
+  setTimeout(() => {
+    const session = callSessions.get(socket.id);
+    if (session && !session.active) {
+      cleanupSession();
+    }
+  }, 30000); // 30 second timeout for inactive sessions
+
+  // Handle socket errors
+  socket.on("error", (err) => {
+    // Skip on error
+  });
 });
 
 // --- Start Server ---
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 Voice Agent Server running on http://localhost:${PORT}`);
+  // Server started silently
 });
