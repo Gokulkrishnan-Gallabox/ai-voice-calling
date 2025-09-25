@@ -36,7 +36,17 @@ export class CallSession {
   constructor(sessionId: string, socket: any) {
     this.sessionId = sessionId;
     this.socket = socket;
-    this.pc = new RTCPeerConnection();
+    
+    // Configure Google STUN servers for NAT traversal
+    const iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' }
+    ];
+    
+    this.pc = new RTCPeerConnection({ iceServers });
     this.voiceAgent = new VoiceAgent(sessionId);
     this.setupWebRTC();
     this.setupAudioProcessing();
