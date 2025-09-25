@@ -1,5 +1,5 @@
 # Use Node.js 20 Alpine image for smaller size, targeting AMD64 architecture
-FROM --platform=linux/amd64 node:20-alpine
+FROM node:22
 
 # Set working directory
 WORKDIR /app
