@@ -233,8 +233,99 @@
                     audio: true
                 });
 
-                // 2. Create PeerConnection
-                peerConnection = new RTCPeerConnection();
+                // 2. Create PeerConnection with STUN and TURN servers
+                const iceServers = [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { 
+                        urls: 'turn:turnvoice.gallabox.dev:3478', 
+                        username: 'webrtcgb', 
+                        credential: 'gbwebrtc' 
+                    }
+                ];
+
+                // Test TURN server connectivity before creating peer connection
+                async function testTurnServer() {
+                    console.log('🔍 Testing TURN server connectivity...');
+                    const testPC = new RTCPeerConnection({
+                        iceServers: [
+                            { 
+                                urls: 'turn:turnvoice.gallabox.dev:3478', 
+                                username: 'webrtcgb', 
+                                credential: 'gbwebrtc' 
+                            }
+                        ],
+                        iceTransportPolicy: 'relay' // Force TURN usage
+                    });
+                    
+                    return new Promise((resolve) => {
+                        let turnCandidateFound = false;
+                        
+                        testPC.onicecandidate = (event) => {
+                            if (event.candidate && event.candidate.type === 'relay') {
+                                console.log('✅ TURN server is accessible');
+                                turnCandidateFound = true;
+                                resolve(true);
+                                testPC.close();
+                            }
+                        };
+                        
+                        testPC.createDataChannel('test');
+                        testPC.createOffer().then(offer => testPC.setLocalDescription(offer));
+                        
+                        setTimeout(() => {
+                            if (!turnCandidateFound) {
+                                console.log('❌ TURN server not accessible');
+                                resolve(false);
+                            }
+                            testPC.close();
+                        }, 5000);
+                    });
+                }
+
+                // Test TURN before creating actual connection
+                const turnWorking = await testTurnServer();
+                if (!turnWorking) {
+                    console.warn('⚠️ TURN server may not be working properly');
+                }
+                
+                peerConnection = new RTCPeerConnection({ 
+                    iceServers,
+                    iceCandidatePoolSize: 10
+                    // Optionally force TURN usage for testing
+                    // iceTransportPolicy: 'relay'
+                });
+
+                // Enhanced ICE connection monitoring
+                peerConnection.oniceconnectionstatechange = () => {
+                    console.log('🧊 ICE connection state:', peerConnection.iceConnectionState);
+                    
+                    switch(peerConnection.iceConnectionState) {
+                        case 'checking':
+                            console.log('🔍 ICE candidates are being checked...');
+                            break;
+                        case 'connected':
+                            console.log('✅ ICE connection established');
+                            break;
+                        case 'completed':
+                            console.log('✅ ICE connection completed');
+                            break;
+                        case 'failed':
+                            console.log('❌ ICE connection failed - may need TURN server');
+                            updateCallState('idle');
+                            break;
+                        case 'disconnected':
+                            console.log('⚠️ ICE connection disconnected');
+                            break;
+                        case 'closed':
+                            console.log('🔒 ICE connection closed');
+                            break;
+                    }
+                };
+
+                // ICE gathering state monitoring
+                peerConnection.onicegatheringstatechange = () => {
+                    console.log('📡 ICE gathering state:', peerConnection.iceGatheringState);
+                };
 
                 // Monitor connection state
                 peerConnection.onconnectionstatechange = () => {
@@ -248,14 +339,24 @@
                     }
                 };
 
-                // Handle and send ICE candidates
+                // Enhanced ICE candidate logging
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate) {
+                        console.log('📤 Sending ICE candidate:', {
+                            type: event.candidate.type,
+                            protocol: event.candidate.protocol,
+                            address: event.candidate.address,
+                            port: event.candidate.port,
+                            candidate: event.candidate.candidate
+                        });
+                        
                         socket.emit('ice-candidate', {
                             candidate: event.candidate.candidate,
                             sdpMLineIndex: event.candidate.sdpMLineIndex,
                             sdpMid: event.candidate.sdpMid
                         });
+                    } else {
+                        console.log('✅ ICE candidate gathering complete');
                     }
                 };
 
