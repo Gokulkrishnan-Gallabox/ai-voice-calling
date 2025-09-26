@@ -41,6 +41,14 @@ if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_VERIFY_TOKEN) {
  * Create a call session for WhatsApp call
  */
 function createWhatsAppCallSession(callId: string): CallSession {
+  // Check if session already exists and clean it up
+  const existingSession = callSessions.get(callId);
+  if (existingSession) {
+    console.log(`[${callId}] Cleaning up existing WhatsApp session before creating new one`);
+    existingSession.cleanup();
+    callSessions.delete(callId);
+  }
+  
   const session = new CallSession(callId, null); // No socket for WhatsApp calls
   callSessions.set(callId, session);
   return session;
@@ -79,6 +87,7 @@ async function postWhatsAppAnswer(phoneNumberId: string, callId: string, answerS
 app.get("/", (_req: Request, res: Response) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
+
 
 // WhatsApp webhook verification (required by Facebook)
 app.get("/whatsapp/meta-tech-partner/accounts/668cfacf05cdeae70cb8db06/channels/67a9735ff774dcbc7fa7e3f1/webhook", (req: Request, res: Response) => {
@@ -173,6 +182,14 @@ async function handleWhatsAppCallOffer(
 
 // --- Helper function to create call session ---
 function createCallSession(socket: any): CallSession {
+  // Check if session already exists and clean it up
+  const existingSession = callSessions.get(socket.id);
+  if (existingSession) {
+    console.log(`[${socket.id}] Cleaning up existing session before creating new one`);
+    existingSession.cleanup();
+    callSessions.delete(socket.id);
+  }
+  
   const session = new CallSession(socket.id, socket);
   callSessions.set(socket.id, session);
   return session;
@@ -183,8 +200,28 @@ io.on("connection", (socket) => {
   socket.emit("connected", { message: "Connected to voice agent server" });
 
   // Handle offer from client (client creates offer)
-  socket.on("call-offer", async ({ sdp }) => {
+  socket.on("call-offer", async ({ sdp, password }) => {
     try {
+      // Check if there's already an active session for this socket
+      const existingSession = callSessions.get(socket.id);
+      if (existingSession && existingSession.active) {
+        socket.emit("call-error", { 
+          error: "Call already active", 
+          message: "You already have an active call. Please end the current call before starting a new one." 
+        });
+        return;
+      }
+
+      // Validate password
+      const correctPassword = process.env.ACCESS_PASSWORD || 'Think@123';
+      if (password !== correctPassword) {
+        socket.emit("call-error", { 
+          error: "Invalid password", 
+          message: "Authentication failed. Please check your password." 
+        });
+        return;
+      }
+      
       const session = createCallSession(socket);
 
       // Set remote description from client offer
@@ -204,21 +241,29 @@ io.on("connection", (socket) => {
 
       // Initialize voice agent for this session once connection is established
       await session.initializeVoice();
+      
+      // Mark session as active after successful initialization
+      // This is handled internally by the CallSession class
 
     } catch (err) {
+      console.error(`[${socket.id}] ❌ Error in call-offer:`, err);
       const session = callSessions.get(socket.id);
       if (session) {
         session.cleanup();
         callSessions.delete(socket.id);
       }
+      
+      socket.emit("call-error", { 
+        error: "Call setup failed", 
+        message: "Failed to establish call. Please try again." 
+      });
     }
   });
 
 
-  // Handle ICE candidates from client with enhanced logging
+  // Handle ICE candidates from client
   socket.on("ice-candidate", async ({ candidate, sdpMLineIndex, sdpMid }) => {
     try {
-      console.log(`[${socket.id}] 📥 Received ICE candidate from client:`, candidate);
       const session = callSessions.get(socket.id);
       if (session) {
         await session.addIceCandidate({
@@ -226,12 +271,9 @@ io.on("connection", (socket) => {
           sdpMLineIndex,
           sdpMid
         });
-        console.log(`[${socket.id}] ✅ ICE candidate added successfully`);
-      } else {
-        console.log(`[${socket.id}] ❌ No session found for ICE candidate`);
       }
     } catch (err) {
-      console.error(`[${socket.id}] ❌ Error adding ICE candidate:`, err);
+      console.error(`[${socket.id}] Error adding ICE candidate:`, err);
     }
   });
 

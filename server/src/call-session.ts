@@ -99,8 +99,8 @@ export class CallSession {
     );
     
     if (audioTransceiver && audioTransceiver.receiver.track) {
-      // Set up audio sink for incoming audio
-      this.audioSink = new RTCAudioSink(audioTransceiver.receiver.track);
+      const incomingTrack = audioTransceiver.receiver.track;
+      this.audioSink = new RTCAudioSink(incomingTrack);
       
       // Handle incoming audio from user with improved buffering
       const onAudioData = async ({ samples: { buffer } }: any) => {
@@ -132,44 +132,21 @@ export class CallSession {
    * Set up WebRTC connection event handlers
    */
   private setupConnectionHandlers(): void {
-    // Enhanced connection state handling with logging
+    // Connection state handling
     this.pc.onconnectionstatechange = () => {
-      console.log(`[${this.sessionId}] 🔗 Connection state:`, this.pc.connectionState);
       if (["disconnected", "failed", "closed"].includes(this.pc.connectionState)) {
         this.cleanup();
       }
     };
 
-    // ICE connection state monitoring
-    this.pc.oniceconnectionstatechange = () => {
-      console.log(`[${this.sessionId}] 🧊 ICE connection state:`, this.pc.iceConnectionState);
-      if (this.pc.iceConnectionState === 'failed') {
-        console.log(`[${this.sessionId}] ❌ ICE connection failed`);
-      }
-    };
-
-    // ICE gathering state monitoring
-    this.pc.onicegatheringstatechange = () => {
-      console.log(`[${this.sessionId}] 📡 ICE gathering state:`, this.pc.iceGatheringState);
-    };
-
-    // Enhanced ICE candidate handling with logging
+    // ICE candidate handling
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this.socket) {
-        console.log(`[${this.sessionId}] 📤 Sending ICE candidate:`, {
-          type: event.candidate.type,
-          protocol: event.candidate.protocol,
-          address: event.candidate.address || 'hidden',
-          candidate: event.candidate.candidate
-        });
-        
         this.socket.emit("ice-candidate", {
           candidate: event.candidate.candidate,
           sdpMLineIndex: event.candidate.sdpMLineIndex,
           sdpMid: event.candidate.sdpMid
         });
-      } else if (!event.candidate) {
-        console.log(`[${this.sessionId}] ✅ ICE candidate gathering complete`);
       }
       // For WhatsApp calls (socket is null), ICE candidates are handled differently
       // They're typically exchanged through the WhatsApp infrastructure

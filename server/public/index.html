@@ -151,14 +151,12 @@
         
         <div id="callState" class="call-state"></div>
         
-        <div class="audio-section">
-            <label>Echo from Server:</label>
+        <div id="audioSection" class="audio-section" style="display: none;">
             <audio 
                 id="remoteAudio" 
-                controls 
                 autoplay 
                 playsinline 
-                style="display: block; margin-top: 5px;"
+                style="display: none;"
             ></audio>
         </div>
     </div>
@@ -177,6 +175,7 @@
         const callButton = document.getElementById('callButton');
         const callStateEl = document.getElementById('callState');
         const remoteAudio = document.getElementById('remoteAudio');
+        const audioSection = document.getElementById('audioSection');
 
         // Update UI based on connection state
         function updateConnectionStatus(connected) {
@@ -205,18 +204,21 @@
                     callButton.className = 'call-button start-call';
                     callButton.disabled = !isConnected;
                     callStateEl.textContent = '';
+                    audioSection.style.display = 'none'; 
                     break;
                 case 'calling':
                     callButton.textContent = '📞 Connecting...';
                     callButton.className = 'call-button start-call';
                     callButton.disabled = true;
                     callStateEl.innerHTML = 'Establishing connection <span class="loading"></span>';
+                    audioSection.style.display = 'none'; 
                     break;
                 case 'active':
                     callButton.textContent = '📞 End Call';
                     callButton.className = 'call-button end-call';
                     callButton.disabled = false;
                     callStateEl.textContent = '✅ Call active - speak into your microphone';
+                    audioSection.style.display = 'block'; 
                     break;
             }
         }
@@ -224,6 +226,12 @@
         // Start call function
         async function startCall() {
             if (!socket || callState !== 'idle') return;
+
+            // Prompt for password before starting call
+            const password = prompt('🔒 Enter password to start call:');
+            if (!password) {
+                return; // User cancelled
+            }
 
             try {
                 updateCallState('calling');
@@ -245,7 +253,6 @@
 
                 // Test TURN server connectivity before creating peer connection
                 async function testTurnServer() {
-                    console.log('🔍 Testing TURN server connectivity...');
                     const testPC = new RTCPeerConnection({
                         iceServers: [
                             { 
@@ -262,7 +269,6 @@
                         
                         testPC.onicecandidate = (event) => {
                             if (event.candidate && event.candidate.type === 'relay') {
-                                console.log('✅ TURN server is accessible');
                                 turnCandidateFound = true;
                                 resolve(true);
                                 testPC.close();
@@ -274,7 +280,6 @@
                         
                         setTimeout(() => {
                             if (!turnCandidateFound) {
-                                console.log('❌ TURN server not accessible');
                                 resolve(false);
                             }
                             testPC.close();
@@ -283,10 +288,7 @@
                 }
 
                 // Test TURN before creating actual connection
-                const turnWorking = await testTurnServer();
-                if (!turnWorking) {
-                    console.warn('⚠️ TURN server may not be working properly');
-                }
+                await testTurnServer();
                 
                 peerConnection = new RTCPeerConnection({ 
                     iceServers,
@@ -295,68 +297,30 @@
                     // iceTransportPolicy: 'relay'
                 });
 
-                // Enhanced ICE connection monitoring
+                // ICE connection monitoring
                 peerConnection.oniceconnectionstatechange = () => {
-                    console.log('🧊 ICE connection state:', peerConnection.iceConnectionState);
-                    
-                    switch(peerConnection.iceConnectionState) {
-                        case 'checking':
-                            console.log('🔍 ICE candidates are being checked...');
-                            break;
-                        case 'connected':
-                            console.log('✅ ICE connection established');
-                            break;
-                        case 'completed':
-                            console.log('✅ ICE connection completed');
-                            break;
-                        case 'failed':
-                            console.log('❌ ICE connection failed - may need TURN server');
-                            updateCallState('idle');
-                            break;
-                        case 'disconnected':
-                            console.log('⚠️ ICE connection disconnected');
-                            break;
-                        case 'closed':
-                            console.log('🔒 ICE connection closed');
-                            break;
-                    }
-                };
-
-                // ICE gathering state monitoring
-                peerConnection.onicegatheringstatechange = () => {
-                    console.log('📡 ICE gathering state:', peerConnection.iceGatheringState);
-                };
-
-                // Monitor connection state
-                peerConnection.onconnectionstatechange = () => {
-                    console.log('Connection state:', peerConnection.connectionState);
-                    if (peerConnection.connectionState === 'connected') {
-                        console.log('✅ WebRTC connection established');
-                        updateCallState('active');
-                    } else if (peerConnection.connectionState === 'failed') {
-                        console.log('❌ WebRTC connection failed');
+                    if (peerConnection.iceConnectionState === 'failed') {
                         updateCallState('idle');
                     }
                 };
 
-                // Enhanced ICE candidate logging
+                // Monitor connection state
+                peerConnection.onconnectionstatechange = () => {
+                    if (peerConnection.connectionState === 'connected') {
+                        updateCallState('active');
+                    } else if (peerConnection.connectionState === 'failed') {
+                        updateCallState('idle');
+                    }
+                };
+
+                // ICE candidate handling
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate) {
-                        console.log('📤 Sending ICE candidate:', {
-                            type: event.candidate.type,
-                            protocol: event.candidate.protocol,
-                            address: event.candidate.address,
-                            port: event.candidate.port,
-                            candidate: event.candidate.candidate
-                        });
-                        
                         socket.emit('ice-candidate', {
                             candidate: event.candidate.candidate,
                             sdpMLineIndex: event.candidate.sdpMLineIndex,
                             sdpMid: event.candidate.sdpMid
                         });
-                    } else {
-                        console.log('✅ ICE candidate gathering complete');
                     }
                 };
 
@@ -368,7 +332,6 @@
                 // 4. Handle incoming remote tracks
                 const remoteStream = new MediaStream();
                 peerConnection.ontrack = (event) => {
-                    console.log('🎵 Received audio track from server');
                     remoteStream.addTrack(event.track);
                     remoteAudio.srcObject = remoteStream;
                 };
@@ -382,7 +345,8 @@
 
                 socket.emit('call-offer', {
                     sdp_type: 'offer',
-                    sdp: offer.sdp
+                    sdp: offer.sdp,
+                    password: password
                 });
 
             } catch (err) {
@@ -423,17 +387,14 @@
             socket = io();
 
             socket.on('connect', () => {
-                console.log('Connected to server');
                 updateConnectionStatus(true);
             });
 
             socket.on('disconnect', () => {
-                console.log('Disconnected from server');
                 updateConnectionStatus(false);
             });
 
             socket.on('connect_error', () => {
-                console.log('Connection error');
                 updateConnectionStatus(false);
             });
 
@@ -448,6 +409,15 @@
                     console.error('Error handling answer from server:', err);
                     updateCallState('idle');
                 }
+            });
+
+            // Handle call errors (including password validation failures)
+            socket.on('call-error', (data) => {
+                console.error('Call error:', data);
+                alert(`❌ ${data.message}`);
+                
+                // Clean up local media and reset call state
+                endCall();
             });
 
             // Handle ICE candidates from server
@@ -482,6 +452,7 @@
                 socket.close();
             }
         });
+
 
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
