@@ -215,9 +215,10 @@ io.on("connection", (socket) => {
   });
 
 
-  // Handle ICE candidates from client
+  // Handle ICE candidates from client with enhanced logging
   socket.on("ice-candidate", async ({ candidate, sdpMLineIndex, sdpMid }) => {
     try {
+      console.log(`[${socket.id}] 📥 Received ICE candidate from client:`, candidate);
       const session = callSessions.get(socket.id);
       if (session) {
         await session.addIceCandidate({
@@ -225,9 +226,12 @@ io.on("connection", (socket) => {
           sdpMLineIndex,
           sdpMid
         });
+        console.log(`[${socket.id}] ✅ ICE candidate added successfully`);
+      } else {
+        console.log(`[${socket.id}] ❌ No session found for ICE candidate`);
       }
     } catch (err) {
-      // Skip on error
+      console.error(`[${socket.id}] ❌ Error adding ICE candidate:`, err);
     }
   });
 

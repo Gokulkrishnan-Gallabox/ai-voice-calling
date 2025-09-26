@@ -132,21 +132,44 @@ export class CallSession {
    * Set up WebRTC connection event handlers
    */
   private setupConnectionHandlers(): void {
-    // Connection state handling
+    // Enhanced connection state handling with logging
     this.pc.onconnectionstatechange = () => {
+      console.log(`[${this.sessionId}] 🔗 Connection state:`, this.pc.connectionState);
       if (["disconnected", "failed", "closed"].includes(this.pc.connectionState)) {
         this.cleanup();
       }
     };
 
-    // ICE candidate handling
+    // ICE connection state monitoring
+    this.pc.oniceconnectionstatechange = () => {
+      console.log(`[${this.sessionId}] 🧊 ICE connection state:`, this.pc.iceConnectionState);
+      if (this.pc.iceConnectionState === 'failed') {
+        console.log(`[${this.sessionId}] ❌ ICE connection failed`);
+      }
+    };
+
+    // ICE gathering state monitoring
+    this.pc.onicegatheringstatechange = () => {
+      console.log(`[${this.sessionId}] 📡 ICE gathering state:`, this.pc.iceGatheringState);
+    };
+
+    // Enhanced ICE candidate handling with logging
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this.socket) {
+        console.log(`[${this.sessionId}] 📤 Sending ICE candidate:`, {
+          type: event.candidate.type,
+          protocol: event.candidate.protocol,
+          address: event.candidate.address || 'hidden',
+          candidate: event.candidate.candidate
+        });
+        
         this.socket.emit("ice-candidate", {
           candidate: event.candidate.candidate,
           sdpMLineIndex: event.candidate.sdpMLineIndex,
           sdpMid: event.candidate.sdpMid
         });
+      } else if (!event.candidate) {
+        console.log(`[${this.sessionId}] ✅ ICE candidate gathering complete`);
       }
       // For WhatsApp calls (socket is null), ICE candidates are handled differently
       // They're typically exchanged through the WhatsApp infrastructure
